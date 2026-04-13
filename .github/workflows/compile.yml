@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       json_url:
-        description: 'json文件链接'
-        required: true
+        description: '（可选）新规则 JSON 链接，填写后会保存到清单'
+        required: false
         type: string
       rule_name:
-        description: '规则名称 (without extension, e.g. my-rules)'
-        required: true
+        description: '（可选）规则名称，不含扩展名，与链接配套填写'
+        required: false
         type: string
 
   schedule:
@@ -17,7 +17,7 @@ on:
 
   push:
     paths:
-      - 'rules/**.json'
+      - 'rules/sources.json'
 
 jobs:
   compile:
@@ -28,15 +28,66 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ── 仅手动触发时：下载新 JSON ──────────────────────────────
-      - name: Download JSON from URL
-        if: github.event_name == 'workflow_dispatch'
+      # ── 手动触发且填写了链接：追加或更新到 sources.json ────────
+      - name: Update sources.json
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.json_url != ''
+        run: |
+          URL="${{ github.event.inputs.json_url }}"
+          NAME="${{ github.event.inputs.rule_name }}"
+          if [ -z "$NAME" ]; then
+            echo "::error::填写了链接但未填写规则名称，请同时填写 rule_name"
+            exit 1
+          fi
+          python3 - <<EOF
+import json
+
+path = "rules/sources.json"
+with open(path, "r") as f:
+    sources = json.load(f)
+
+found = False
+for entry in sources:
+    if entry["name"] == "$NAME":
+        entry["url"] = "$URL"
+        found = True
+        break
+
+if not found:
+    sources.append({"name": "$NAME", "url": "$URL"})
+
+with open(path, "w") as f:
+    json.dump(sources, f, indent=2, ensure_ascii=False)
+
+print(f"{'Updated' if found else 'Added'}: $NAME -> $URL")
+EOF
+
+      # ── 从 sources.json 下载所有规则 JSON ──────────────────────
+      - name: Download rules from sources.json
         run: |
           mkdir -p rules
-          echo "Downloading: ${{ github.event.inputs.json_url }}"
-          curl -fsSL "${{ github.event.inputs.json_url }}" \
-            -o "rules/${{ github.event.inputs.rule_name }}.json"
-          echo "Saved to: rules/${{ github.event.inputs.rule_name }}.json"
+          python3 - <<'EOF'
+import json, urllib.request, sys
+
+path = "rules/sources.json"
+with open(path, "r") as f:
+    sources = json.load(f)
+
+if not sources:
+    print("sources.json 为空，没有需要下载的规则。")
+    sys.exit(0)
+
+for entry in sources:
+    name = entry["name"]
+    url  = entry["url"]
+    dest = f"rules/{name}.json"
+    print(f"Downloading {name} <- {url}")
+    try:
+        urllib.request.urlretrieve(url, dest)
+        print(f"  Saved: {dest}")
+    except Exception as e:
+        print(f"  ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+EOF
 
       # ── 下载 sing-box ──────────────────────────────────────────
       - name: Download sing-box
@@ -49,26 +100,43 @@ jobs:
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
 
-      # ── 编译所有 rules/*.json → output/*.srs ──────────────────
+      # ── 仅编译 sources.json 中列出的规则 ──────────────────────
       - name: Compile json to srs
         run: |
           mkdir -p output
-          shopt -s nullglob
-          files=(rules/*.json)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No JSON files found in rules/, skipping."
-            exit 0
-          fi
-          for f in "${files[@]}"; do
-            name=$(basename "$f" .json)
-            # 存在同名 srs 则先删除，确保用新 json 覆盖重编译
-            if [ -f "output/${name}.srs" ]; then
-              rm -f "output/${name}.srs"
-              echo "Removed old: ${name}.srs"
-            fi
-            sing-box rule-set compile --output "output/${name}.srs" "$f"
-            echo "Compiled: ${name}.srs"
-          done
+          python3 - <<'EOF'
+import json, os, subprocess, sys
+
+with open("rules/sources.json", "r") as f:
+    sources = json.load(f)
+
+if not sources:
+    print("sources.json 为空，跳过编译。")
+    sys.exit(0)
+
+for entry in sources:
+    name = entry["name"]
+    src  = f"rules/{name}.json"
+    dst  = f"output/{name}.srs"
+
+    if not os.path.exists(src):
+        print(f"WARNING: {src} 不存在，跳过。")
+        continue
+
+    if os.path.exists(dst):
+        os.remove(dst)
+        print(f"Removed old: {name}.srs")
+
+    result = subprocess.run(
+        ["sing-box", "rule-set", "compile", "--output", dst, src],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"ERROR compiling {name}:\n{result.stderr}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Compiled: {name}.srs")
+EOF
 
       # ── 提交变更 ───────────────────────────────────────────────
       - name: Commit changes
@@ -79,8 +147,9 @@ jobs:
           if git diff --cached --quiet; then
             echo "Nothing to commit."
           else
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              MSG="Add rule: ${{ github.event.inputs.rule_name }}"
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+               [ -n "${{ github.event.inputs.rule_name }}" ]; then
+              MSG="Update rule: ${{ github.event.inputs.rule_name }}"
             else
               MSG="Auto update rules (scheduled)"
             fi
