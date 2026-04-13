@@ -1,4 +1,3 @@
-
 name: 编译规则集
 
 on:
@@ -108,6 +107,24 @@ jobs:
           [ $HAS_ERROR -eq 1 ] && exit 1
 
       - name: Commit changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_RULE_NAME: ${{ github.event.inputs.rule_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add rules/ output/
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_RULE_NAME" ]; then
+              MSG="Update rule: $INPUT_RULE_NAME"
+            else
+              MSG="Auto update rules (scheduled)"
+            fi
+            git commit -m "$MSG"
+            git push
+          fi      - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
