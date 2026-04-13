@@ -1,14 +1,14 @@
-name: 规则转换
+name: 编译规则集
 
 on:
   workflow_dispatch:
     inputs:
       json_url:
-        description: 'JSON rule file URL to download'
+        description: 'json文件链接'
         required: true
         type: string
       rule_name:
-        description: 'Rule file name (without extension, e.g. my-rules)'
+        description: '规则名称 (without extension, e.g. my-rules)'
         required: true
         type: string
 
@@ -29,7 +29,7 @@ jobs:
           fetch-depth: 0
 
       # ── 仅手动触发时：下载新 JSON ──────────────────────────────
-      - name: 下载新 JSON
+      - name: Download JSON from URL
         if: github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p rules
@@ -39,7 +39,7 @@ jobs:
           echo "Saved to: rules/${{ github.event.inputs.rule_name }}.json"
 
       # ── 下载 sing-box ──────────────────────────────────────────
-      - name: 下载 sing-box
+      - name: Download sing-box
         run: |
           LATEST=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
             | grep tag_name | cut -d'"' -f4)
@@ -50,7 +50,7 @@ jobs:
           sing-box version
 
       # ── 编译所有 rules/*.json → output/*.srs ──────────────────
-      - name: 编译所有 rules/*.json → output/*.srs
+      - name: Compile json to srs
         run: |
           mkdir -p output
           shopt -s nullglob
@@ -61,12 +61,17 @@ jobs:
           fi
           for f in "${files[@]}"; do
             name=$(basename "$f" .json)
+            # 存在同名 srs 则先删除，确保用新 json 覆盖重编译
+            if [ -f "output/${name}.srs" ]; then
+              rm -f "output/${name}.srs"
+              echo "Removed old: ${name}.srs"
+            fi
             sing-box rule-set compile --output "output/${name}.srs" "$f"
             echo "Compiled: ${name}.srs"
           done
 
       # ── 提交变更 ───────────────────────────────────────────────
-      - name: 提交变更
+      - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
