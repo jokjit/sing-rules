@@ -1,1 +1,3 @@
 规则转换
+rules用来保存json
+output用来保存转换后的srs文件
