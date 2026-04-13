@@ -17,7 +17,7 @@ on:
 
   push:
     paths:
-      - 'rules/sources.json'
+      - 'rules/**.json'
 
 jobs:
   compile:
@@ -64,16 +64,16 @@ EOF
       # ── 从 sources.json 下载所有规则 JSON ──────────────────────
       - name: Download rules from sources.json
         run: |
-          mkdir -p rules
+          mkdir -p rules output
           python3 - <<'EOF'
-import json, urllib.request, sys
+import json, urllib.request, sys, os
 
 path = "rules/sources.json"
 with open(path, "r") as f:
     sources = json.load(f)
 
 if not sources:
-    print("sources.json 为空，没有需要下载的规则。")
+    print("sources.json 为空，跳过下载。")
     sys.exit(0)
 
 for entry in sources:
@@ -100,14 +100,79 @@ EOF
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
 
-      # ── 仅编译 sources.json 中列出的规则 ──────────────────────
+      # ── 编译：清单来源 + 手动上传的 json 全部处理 ─────────────
       - name: Compile json to srs
         run: |
           mkdir -p output
           python3 - <<'EOF'
 import json, os, subprocess, sys
 
-with open("rules/sources.json", "r") as f:
+# 读取 sources.json 中已知的名称
+sources_path = "rules/sources.json"
+with open(sources_path, "r") as f:
+    sources = json.load(f)
+known_names = {entry["name"] for entry in sources}
+
+# 扫描 rules/ 目录，收集所有需要编译的 json
+# 包含：sources.json 清单里的 + 手动上传但不在清单里的
+# 排除：sources.json 本身
+to_compile = set(known_names)
+for fname in os.listdir("rules"):
+    if fname == "sources.json":
+        continue
+    if fname.endswith(".json"):
+        to_compile.add(fname[:-5])   # 去掉 .json 后缀
+
+if not to_compile:
+    print("没有需要编译的规则，跳过。")
+    sys.exit(0)
+
+has_error = False
+for name in sorted(to_compile):
+    src = f"rules/{name}.json"
+    dst = f"output/{name}.srs"
+
+    if not os.path.exists(src):
+        print(f"WARNING: {src} 不存在，跳过。")
+        continue
+
+    if os.path.exists(dst):
+        os.remove(dst)
+        print(f"Removed old: {name}.srs")
+
+    result = subprocess.run(
+        ["sing-box", "rule-set", "compile", "--output", dst, src],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"ERROR compiling {name}:\n{result.stderr}", file=sys.stderr)
+        has_error = True
+        continue
+
+    print(f"Compiled: {name}.srs")
+
+if has_error:
+    sys.exit(1)
+EOF
+
+      # ── 提交变更 ───────────────────────────────────────────────
+      - name: Commit changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add rules/ output/
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+               [ -n "${{ github.event.inputs.rule_name }}" ]; then
+              MSG="Update rule: ${{ github.event.inputs.rule_name }}"
+            else
+              MSG="Auto update rules (scheduled)"
+            fi
+            git commit -m "$MSG"
+            git push
+          fiwith open("rules/sources.json", "r") as f:
     sources = json.load(f)
 
 if not sources:
