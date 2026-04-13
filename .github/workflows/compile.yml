@@ -1,6 +1,20 @@
-name: Compile Rule Sets
+name: 规则转换
 
 on:
+  workflow_dispatch:
+    inputs:
+      json_url:
+        description: 'JSON rule file URL to download'
+        required: true
+        type: string
+      rule_name:
+        description: 'Rule file name (without extension, e.g. my-rules)'
+        required: true
+        type: string
+
+  schedule:
+    - cron: '0 0 * * *'   # 每天 UTC 00:00 自动触发
+
   push:
     paths:
       - 'rules/**.json'
@@ -14,28 +28,57 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download sing-box
+      # ── 仅手动触发时：下载新 JSON ──────────────────────────────
+      - name: 下载新 JSON
+        if: github.event_name == 'workflow_dispatch'
         run: |
-          LATEST=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep tag_name | cut -d'"' -f4)
+          mkdir -p rules
+          echo "Downloading: ${{ github.event.inputs.json_url }}"
+          curl -fsSL "${{ github.event.inputs.json_url }}" \
+            -o "rules/${{ github.event.inputs.rule_name }}.json"
+          echo "Saved to: rules/${{ github.event.inputs.rule_name }}.json"
+
+      # ── 下载 sing-box ──────────────────────────────────────────
+      - name: 下载 sing-box
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+            | grep tag_name | cut -d'"' -f4)
           VERSION=${LATEST#v}
           wget -q "https://github.com/SagerNet/sing-box/releases/download/${LATEST}/sing-box-${VERSION}-linux-amd64.tar.gz"
           tar -xzf sing-box-*.tar.gz
           sudo mv sing-box-*/sing-box /usr/local/bin/
           sing-box version
 
-      - name: Compile json to srs
+      # ── 编译所有 rules/*.json → output/*.srs ──────────────────
+      - name: 编译所有 rules/*.json → output/*.srs
         run: |
           mkdir -p output
-          for f in rules/*.json; do
+          shopt -s nullglob
+          files=(rules/*.json)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No JSON files found in rules/, skipping."
+            exit 0
+          fi
+          for f in "${files[@]}"; do
             name=$(basename "$f" .json)
             sing-box rule-set compile --output "output/${name}.srs" "$f"
             echo "Compiled: ${name}.srs"
           done
 
-      - name: Commit srs files
+      # ── 提交变更 ───────────────────────────────────────────────
+      - name: 提交变更
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/*.srs
-          git diff --cached --quiet || git commit -m "Auto compile srs from json"
-          git push --force
+          git add rules/ output/
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              MSG="Add rule: ${{ github.event.inputs.rule_name }}"
+            else
+              MSG="Auto update rules (scheduled)"
+            fi
+            git commit -m "$MSG"
+            git push
+          fi
