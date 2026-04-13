@@ -4,156 +4,146 @@ on:
   workflow_dispatch:
     inputs:
       json_url:
-        description: '（可选）新规则 JSON 链接，填写后会保存到清单'
+        description: '可选 新规则JSON链接'
         required: false
         type: string
       rule_name:
-        description: '（可选）规则名称，不含扩展名，与链接配套填写'
+        description: '可选 规则名称不含扩展名'
         required: false
         type: string
-
   schedule:
     - cron: '0 0 * * *'
-
   push:
     paths:
       - 'rules/**.json'
 
+permissions:
+  contents: write
+
 jobs:
   compile:
     runs-on: ubuntu-latest
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      INPUT_URL: ${{ github.event.inputs.json_url }}
+      INPUT_NAME: ${{ github.event.inputs.rule_name }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+
+      # ✅ 安装 jq
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl wget
 
       - name: Update sources.json
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.json_url != ''
-        env:
-          INPUT_URL: ${{ github.event.inputs.json_url }}
-          INPUT_NAME: ${{ github.event.inputs.rule_name }}
         run: |
           if [ -z "$INPUT_NAME" ]; then
-            echo "::error::填写了链接但未填写规则名称"
+            echo "::error::请同时填写规则名称"
             exit 1
           fi
-          if jq -e --arg n "$INPUT_NAME" 'any(.[]; .name == $n)' rules/sources.json > /dev/null; then
+
+          EXISTS=$(jq --arg n "$INPUT_NAME" 'any(.[]; .name == $n)' rules/sources.json)
+
+          if [ "$EXISTS" = "true" ]; then
             jq --arg n "$INPUT_NAME" --arg u "$INPUT_URL" \
               'map(if .name == $n then .url = $u else . end)' \
-              rules/sources.json > /tmp/sources.tmp && mv /tmp/sources.tmp rules/sources.json
-            echo "Updated: $INPUT_NAME -> $INPUT_URL"
+              rules/sources.json > tmp.json
           else
             jq --arg n "$INPUT_NAME" --arg u "$INPUT_URL" \
               '. += [{"name": $n, "url": $u}]' \
-              rules/sources.json > /tmp/sources.tmp && mv /tmp/sources.tmp rules/sources.json
-            echo "Added: $INPUT_NAME -> $INPUT_URL"
+              rules/sources.json > tmp.json
           fi
 
-      - name: Download rules from sources.json
+          mv tmp.json rules/sources.json
+          echo "Done: $INPUT_NAME -> $INPUT_URL"
+
+      - name: Download rules
         run: |
           mkdir -p rules output
+
           COUNT=$(jq 'length' rules/sources.json)
           if [ "$COUNT" -eq 0 ]; then
-            echo "sources.json 为空，跳过下载。"
+            echo "sources.json 为空，跳过"
             exit 0
           fi
-          jq -r '.[] | "\(.name) \(.url)"' rules/sources.json | while read -r name url; do
-            echo "Downloading $name <- $url"
-            curl -fsSL "$url" -o "rules/${name}.json"
-            echo "  Saved: rules/${name}.json"
+
+          jq -c '.[]' rules/sources.json | while read -r item; do
+            name=$(echo "$item" | jq -r '.name')
+            url=$(echo "$item" | jq -r '.url')
+
+            echo "Downloading $name"
+            curl -fsSL "$url" -o "rules/${name}.json" || {
+              echo "Download failed: $name"
+              exit 1
+            }
           done
 
       - name: Download sing-box
         run: |
-          LATEST=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep tag_name | cut -d'"' -f4)
-          VERSION=${LATEST#v}
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/${LATEST}/sing-box-${VERSION}-linux-amd64.tar.gz"
+          VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
+          VERSION=${VERSION#v}
+
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
+
           tar -xzf sing-box-*.tar.gz
           sudo mv sing-box-*/sing-box /usr/local/bin/
+
           sing-box version
 
-      - name: Compile json to srs
+      - name: Compile rules
         run: |
           mkdir -p output
-          KNOWN=$(jq -r '.[].name' rules/sources.json)
-          UPLOADED=""
-          for f in rules/*.json; do
-            fname=$(basename "$f" .json)
-            [ "$fname" = "sources" ] && continue
-            UPLOADED="$UPLOADED $fname"
-          done
-          ALL_NAMES=$(echo "$KNOWN $UPLOADED" | tr ' ' '\n' | sort -u | grep -v '^$')
-          if [ -z "$ALL_NAMES" ]; then
-            echo "没有需要编译的规则，跳过。"
+          HAS_ERROR=0
+
+          shopt -s nullglob
+          files=(rules/*.json)
+
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "没有规则文件"
             exit 0
           fi
-          HAS_ERROR=0
-          for name in $ALL_NAMES; do
-            src="rules/${name}.json"
+
+          for f in "${files[@]}"; do
+            name=$(basename "$f" .json)
+
+            [ "$name" = "sources" ] && continue
+
             dst="output/${name}.srs"
-            if [ ! -f "$src" ]; then
-              echo "WARNING: $src 不存在，跳过。"
-              continue
-            fi
-            [ -f "$dst" ] && rm -f "$dst" && echo "Removed old: ${name}.srs"
-            if sing-box rule-set compile --output "$dst" "$src"; then
+            rm -f "$dst"
+
+            if sing-box rule-set compile --output "$dst" "$f"; then
               echo "Compiled: ${name}.srs"
             else
-              echo "ERROR compiling: $name"
+              echo "ERROR: $name"
               HAS_ERROR=1
             fi
           done
+
           [ $HAS_ERROR -eq 1 ] && exit 1
 
       - name: Commit changes
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_RULE_NAME: ${{ github.event.inputs.rule_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add rules/ output/
+
           if git diff --cached --quiet; then
-            echo "Nothing to commit."
+            echo "Nothing to commit"
+            exit 0
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_NAME" ]; then
+            git commit -m "Update rule: $INPUT_NAME"
           else
-            if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_RULE_NAME" ]; then
-              MSG="Update rule: $INPUT_RULE_NAME"
-            else
-              MSG="Auto update rules (scheduled)"
-            fi
-            git commit -m "$MSG"
-            git push
-          fi      - name: Commit changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add rules/ output/
-          if git diff --cached --quiet; then
-            echo "Nothing to commit."
-          else
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.rule_name }}" ]; then
-              MSG="Update rule: ${{ github.event.inputs.rule_name }}"
-            else
-              MSG="Auto update rules (scheduled)"
-            fi
-            git commit -m "$MSG"
-            git push
-          fifor fname in os.listdir("rules"):
-    if fname == "sources.json":
-        continue
-    if fname.endswith(".json"):
-        to_compile.add(fname[:-5])
-if not to_compile:
-    print("没有需要编译的规则，跳过。")
-    sys.exit(0)
-has_error = False
-for name in sorted(to_compile):
-    src = f"rules/{name}.json"
-    dst = f"output/{name}.srs"
-    if not os.path.exists(src):
-        print(f"WARNING: {src} 不存在，跳过。")
-        continue
+            git commit -m "Auto update rules"
+          fi
+
+          git push        continue
     if os.path.exists(dst):
         os.remove(dst)
         print(f"Removed old: {name}.srs")
