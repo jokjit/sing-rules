@@ -4,18 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       json_url:
-        description: '可选 新规则JSON链接'
+        description: "可选 新规则JSON链接"
         required: false
         type: string
       rule_name:
-        description: '可选 规则名称不含扩展名'
+        description: "可选 规则名称不含扩展名"
         required: false
         type: string
   schedule:
-    - cron: '0 0 * * *'
+    - cron: "0 0 * * *"
   push:
     paths:
-      - 'rules/**.json'
+      - "rules/**.json"
 
 permissions:
   contents: write
@@ -32,15 +32,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ✅ 安装 jq
       - name: Install dependencies
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y jq curl wget
 
       - name: Update sources.json
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.json_url != ''
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.json_url != '' }}
         run: |
+          set -e
+
           if [ -z "$INPUT_NAME" ]; then
             echo "::error::请同时填写规则名称"
             exit 1
@@ -63,6 +65,8 @@ jobs:
 
       - name: Download rules
         run: |
+          set -e
+
           mkdir -p rules output
 
           COUNT=$(jq 'length' rules/sources.json)
@@ -76,14 +80,13 @@ jobs:
             url=$(echo "$item" | jq -r '.url')
 
             echo "Downloading $name"
-            curl -fsSL "$url" -o "rules/${name}.json" || {
-              echo "Download failed: $name"
-              exit 1
-            }
+            curl -fsSL "$url" -o "rules/${name}.json"
           done
 
       - name: Download sing-box
         run: |
+          set -e
+
           VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r '.tag_name')
           VERSION=${VERSION#v}
 
@@ -96,6 +99,8 @@ jobs:
 
       - name: Compile rules
         run: |
+          set -e
+
           mkdir -p output
           HAS_ERROR=0
 
@@ -110,7 +115,9 @@ jobs:
           for f in "${files[@]}"; do
             name=$(basename "$f" .json)
 
-            [ "$name" = "sources" ] && continue
+            if [ "$name" = "sources" ]; then
+              continue
+            fi
 
             dst="output/${name}.srs"
             rm -f "$dst"
@@ -123,10 +130,14 @@ jobs:
             fi
           done
 
-          [ $HAS_ERROR -eq 1 ] && exit 1
+          if [ $HAS_ERROR -eq 1 ]; then
+            exit 1
+          fi
 
       - name: Commit changes
         run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -137,133 +148,10 @@ jobs:
             exit 0
           fi
 
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_NAME" ]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$INPUT_NAME" ]]; then
             git commit -m "Update rule: $INPUT_NAME"
           else
             git commit -m "Auto update rules"
           fi
 
-          git push        continue
-    if os.path.exists(dst):
-        os.remove(dst)
-        print(f"Removed old: {name}.srs")
-    result = subprocess.run(
-        ["sing-box", "rule-set", "compile", "--output", dst, src],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"ERROR compiling {name}:\n{result.stderr}", file=sys.stderr)
-        has_error = True
-        continue
-    print(f"Compiled: {name}.srs")
-if has_error:
-    sys.exit(1)
-PYEOF
-          python3 /tmp/compile_rules.py
-
-      # ── 提交变更 ───────────────────────────────────────────────
-      - name: Commit changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add rules/ output/
-          if git diff --cached --quiet; then
-            echo "Nothing to commit."
-          else
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
-               [ -n "${{ github.event.inputs.rule_name }}" ]; then
-              MSG="Update rule: ${{ github.event.inputs.rule_name }}"
-            else
-              MSG="Auto update rules (scheduled)"
-            fi
-            git commit -m "$MSG"
-            git push
-          fi    if not os.path.exists(src):
-        print(f"WARNING: {src} 不存在，跳过。")
-        continue
-
-    if os.path.exists(dst):
-        os.remove(dst)
-        print(f"Removed old: {name}.srs")
-
-    result = subprocess.run(
-        ["sing-box", "rule-set", "compile", "--output", dst, src],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"ERROR compiling {name}:\n{result.stderr}", file=sys.stderr)
-        has_error = True
-        continue
-
-    print(f"Compiled: {name}.srs")
-
-if has_error:
-    sys.exit(1)
-EOF
-
-      # ── 提交变更 ───────────────────────────────────────────────
-      - name: Commit changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add rules/ output/
-          if git diff --cached --quiet; then
-            echo "Nothing to commit."
-          else
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
-               [ -n "${{ github.event.inputs.rule_name }}" ]; then
-              MSG="Update rule: ${{ github.event.inputs.rule_name }}"
-            else
-              MSG="Auto update rules (scheduled)"
-            fi
-            git commit -m "$MSG"
-            git push
-          fiwith open("rules/sources.json", "r") as f:
-    sources = json.load(f)
-
-if not sources:
-    print("sources.json 为空，跳过编译。")
-    sys.exit(0)
-
-for entry in sources:
-    name = entry["name"]
-    src  = f"rules/{name}.json"
-    dst  = f"output/{name}.srs"
-
-    if not os.path.exists(src):
-        print(f"WARNING: {src} 不存在，跳过。")
-        continue
-
-    if os.path.exists(dst):
-        os.remove(dst)
-        print(f"Removed old: {name}.srs")
-
-    result = subprocess.run(
-        ["sing-box", "rule-set", "compile", "--output", dst, src],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"ERROR compiling {name}:\n{result.stderr}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Compiled: {name}.srs")
-EOF
-
-      # ── 提交变更 ───────────────────────────────────────────────
-      - name: Commit changes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add rules/ output/
-          if git diff --cached --quiet; then
-            echo "Nothing to commit."
-          else
-            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
-               [ -n "${{ github.event.inputs.rule_name }}" ]; then
-              MSG="Update rule: ${{ github.event.inputs.rule_name }}"
-            else
-              MSG="Auto update rules (scheduled)"
-            fi
-            git commit -m "$MSG"
-            git push
-          fi
+          git push
